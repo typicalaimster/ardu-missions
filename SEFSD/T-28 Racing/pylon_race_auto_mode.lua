@@ -34,10 +34,12 @@ local DEFAULT_LAP_COUNT = 5      -- default laps (overridden by arg1)
 local UPDATE_RATE_HZ = 20        -- script update rate
 local TARGET_ALTITUDE = 9.13     -- meters AGL (30 feet)
 
--- Turn point configuration
-local TURN_RADIUS = 35.0         -- meters - advance to next WP when within this (larger = turn earlier, less overshoot)
+-- Physics-based turn configuration
+local GRAVITY = 9.81             -- m/s^2
+local MAX_BANK_ANGLE = 45.0      -- degrees - maximum bank angle for racing turns
+local TURN_ANTICIPATION_FACTOR = 1.2  -- multiplier for early turn initiation (>1.0 = turn earlier)
 local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate corner
-local LOOKAHEAD_DIST = 28.0      -- meters - start blending to next corner (smaller = less lead, tighter at corner)
+local LOOKAHEAD_TIME = 1.5       -- seconds - how far ahead to blend toward next waypoint
 
 -- ============================================================================
 -- COURSE DEFINITION
@@ -177,7 +179,24 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     return true
 end
 
--- Calculate lookahead blending
+-- Calculate physics-based turn radius for current conditions
+-- Returns the distance at which we should advance to next waypoint
+function calculate_turn_anticipation()
+    local groundspeed = get_groundspeed()
+    
+    -- Physics: turn_radius = v^2 / (g * tan(bank_angle))
+    local bank_rad = math.rad(MAX_BANK_ANGLE)
+    local turn_radius = (groundspeed * groundspeed) / (GRAVITY * math.tan(bank_rad))
+    
+    -- Apply anticipation factor to turn earlier (compensates for response lag)
+    local anticipation = turn_radius * TURN_ANTICIPATION_FACTOR
+    
+    -- Clamp to reasonable bounds (don't turn too early or too late)
+    return math.max(15.0, math.min(50.0, anticipation))
+end
+
+-- Calculate lookahead blending based on time and current velocity
+-- This creates a smooth racing line by blending toward the next waypoint
 function get_lookahead_target(current_idx, next_idx)
     local current_wp = course[current_idx + 1]
     local next_wp = course[next_idx + 1]
@@ -185,20 +204,19 @@ function get_lookahead_target(current_idx, next_idx)
     if not current_wp then return 0, 0 end
     if not next_wp then return current_wp.lat, current_wp.lon end
 
-    -- When approaching SE (index 4), do not blend toward gate until we reach SE.
-    -- Otherwise the target pulls south toward the gate and the plane never turns west at SE.
-    if current_idx == 4 then
-        return current_wp.lat, current_wp.lon
-    end
-
     local dist = get_distance_to(current_wp.lat, current_wp.lon)
     if not dist then
         return current_wp.lat, current_wp.lon
     end
 
+    -- Calculate lookahead distance based on groundspeed and time
+    -- Faster = look farther ahead for smoother racing line
+    local groundspeed = get_groundspeed()
+    local lookahead_dist = groundspeed * LOOKAHEAD_TIME
+    
     -- Blend when within lookahead distance
-    if dist < LOOKAHEAD_DIST then
-        local blend = math.max(0, math.min(1, 1.0 - (dist / LOOKAHEAD_DIST)))
+    if dist < lookahead_dist then
+        local blend = math.max(0, math.min(1, 1.0 - (dist / lookahead_dist)))
         local lat = current_wp.lat + blend * (next_wp.lat - current_wp.lat)
         local lon = current_wp.lon + blend * (next_wp.lon - current_wp.lon)
         return lat, lon
@@ -293,15 +311,18 @@ function update_race()
     set_navigation_target(nav_lat, nav_lon)
 
     log(7, "PYLON: update_race check radius")
-    if dist < TURN_RADIUS then
+    -- Calculate dynamic turn anticipation based on current groundspeed
+    local turn_anticipation = calculate_turn_anticipation()
+    if dist < turn_anticipation then
         log(7, "PYLON: update_race advance_target")
         advance_target()
     end
     
-    -- Periodic telemetry
+    -- Periodic telemetry with dynamic turn radius
     if millis() % 2000 < 100 then
-        gcs:send_text(7, string.format("PYLON: L%d %s %.0fm", 
-            current_lap + 1, target.name, dist))
+        local gs = get_groundspeed()
+        gcs:send_text(7, string.format("PYLON: L%d %s %.0fm (GS:%.1fm/s R:%.0fm)", 
+            current_lap + 1, target.name, dist, gs, turn_anticipation))
     end
 end
 
@@ -363,8 +384,10 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v3.2 (AUTO mode, debug log)")
+gcs:send_text(6, "PYLON RACE: Loaded v4.0 (Physics-based wind-adaptive navigation)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
 gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
+gcs:send_text(6, string.format("PYLON: Bank=%.0f° Anticipation=%.1fx Lookahead=%.1fs", 
+    MAX_BANK_ANGLE, TURN_ANTICIPATION_FACTOR, LOOKAHEAD_TIME))
 
 return update()

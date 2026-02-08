@@ -1,0 +1,36 @@
+# Python Requirements for ArduPilot Flight Log Analysis Scripts
+#
+# Installation:
+#   python3 -m venv .venv
+#   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Basic scripts (analyze_flight_logs.py, analyze_ne_corner.py):
+#   - Use only standard library (no dependencies)
+#   - Work with KML/KMZ files
+#
+# Advanced scripts (bin_to_kmz.py, analyze_bin_telemetry.py):
+#   - Require pymavlink for .bin log parsing
+
+# Required for binary log analysis (.bin files)
+pymavlink>=2.4.0
+
+# Future: Visualization and plotting
+# matplotlib>=3.5.0
+# seaborn>=0.11.0
+
+# Future: Data analysis and manipulation
+# pandas>=1.3.0
+# numpy>=1.21.0
+
+# Future: Interactive maps
+# folium>=0.12.0
+
+# Future: PDF report generation
+# reportlab>=3.6.0
+
+# Future: YAML configuration files
+# PyYAML>=6.0
+
+# Note: Keep this file updated when adding dependencies
+# Generate current dependencies with: pip freeze > requirements.txt
