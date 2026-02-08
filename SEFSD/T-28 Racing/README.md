@@ -21,6 +21,8 @@ Complete documentation for autonomous pylon racing using ArduPilot Lua scripting
 
 This racing system uses ArduPilot's **NAV_SCRIPT_TIME** waypoint command to enable scripted pylon racing within AUTO mode missions. The script takes control during the race section, then returns control to AUTO mode to continue the mission.
 
+🛑 **<span style="color:red">You must use an H7 series autopilot that supports scripting. Such as the Matek H743-WLITE.</span>**
+
 ### Key Files
 
 | File | Description |
