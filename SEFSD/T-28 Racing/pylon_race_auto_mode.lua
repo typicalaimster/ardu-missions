@@ -14,15 +14,30 @@
 -- CONFIGURATION PARAMETERS
 -- ============================================================================
 
-local CRUISE_SPEED = 15.0        -- m/s cruise airspeed (ADJUST THIS)
+-- Read cruise speed from autopilot parameter (AIRSPEED_CRUISE in m/s)
+-- Fallback to 18.0 m/s if parameter not available
+local function get_cruise_speed()
+    local aspd_cruise = param:get('AIRSPEED_CRUISE')
+    if aspd_cruise and aspd_cruise > 0 then
+        return aspd_cruise
+    end
+    -- Try TRIM_ARSPD_CM (in cm/s) as fallback
+    local trim_aspd = param:get('TRIM_ARSPD_CM')
+    if trim_aspd and trim_aspd > 0 then
+        return trim_aspd / 100.0  -- convert cm/s to m/s
+    end
+    return 18.0  -- final fallback
+end
+
+local CRUISE_SPEED = get_cruise_speed()
 local DEFAULT_LAP_COUNT = 5      -- default laps (overridden by arg1)
 local UPDATE_RATE_HZ = 20        -- script update rate
 local TARGET_ALTITUDE = 9.13     -- meters AGL (30 feet)
 
 -- Turn point configuration
-local TURN_RADIUS = 15.0         -- meters - advance when within this distance
-local MIN_TURN_RADIUS = 12.0     -- meters - must get within to validate
-local LOOKAHEAD_DIST = 30.0      -- meters - start blending to next corner
+local TURN_RADIUS = 20.0         -- meters - advance when within this distance
+local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate
+local LOOKAHEAD_DIST = 35.0      -- meters - start blending to next corner
 
 -- ============================================================================
 -- COURSE DEFINITION
@@ -310,8 +325,8 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v3.0 (AUTO mode)")
+gcs:send_text(6, "PYLON RACE: Loaded v3.1 (AUTO mode)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
-gcs:send_text(6, string.format("PYLON: Default %d laps @ %.1fm/s", DEFAULT_LAP_COUNT, CRUISE_SPEED))
+gcs:send_text(6, string.format("PYLON: Default %d laps @ %.1fm/s (cruise from param)", DEFAULT_LAP_COUNT, CRUISE_SPEED))
 
 return update()

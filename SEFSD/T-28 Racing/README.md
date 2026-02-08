@@ -23,6 +23,10 @@ This racing system uses ArduPilot's **NAV_SCRIPT_TIME** waypoint command to enab
 
 🛑 **<span style="color:red">You must use an H7 series autopilot that supports scripting. Such as the Matek H743-WLITE.</span>**
 
+🛑 **DO NOT FUCK AROUND OR YOU WILL FIND OUT!**
+
+
+
 ### Key Files
 
 | File | Description |
