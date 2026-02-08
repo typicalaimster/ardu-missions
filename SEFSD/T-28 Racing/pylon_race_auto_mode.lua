@@ -35,9 +35,9 @@ local UPDATE_RATE_HZ = 20        -- script update rate
 local TARGET_ALTITUDE = 9.13     -- meters AGL (30 feet)
 
 -- Turn point configuration
-local TURN_RADIUS = 20.0         -- meters - advance when within this distance
-local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate
-local LOOKAHEAD_DIST = 35.0      -- meters - start blending to next corner
+local TURN_RADIUS = 35.0         -- meters - advance to next WP when within this (larger = turn earlier, less overshoot)
+local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate corner
+local LOOKAHEAD_DIST = 28.0      -- meters - start blending to next corner (smaller = less lead, tighter at corner)
 
 -- ============================================================================
 -- COURSE DEFINITION
@@ -72,6 +72,14 @@ local race_start_time = 0
 local lap_start_times = {}
 local corner_validated = {}
 local last_gate_side = nil        -- Track which side of gate we're on
+
+-- Log level: 6 = Info (key checkpoints), 7 = Debug (verbose)
+local LOG_LEVEL = 6
+local function log(level, msg)
+    if level <= LOG_LEVEL and type(msg) == "string" then
+        gcs:send_text(level, msg)
+    end
+end
 
 -- ============================================================================
 -- UTILITY FUNCTIONS
@@ -114,23 +122,30 @@ end
 
 -- Check if we've crossed the start gate
 function check_gate_crossing()
+    log(7, "PYLON: check_gate_crossing enter")
     local current = get_position()
-    if not current then return false end
-    
-    local current_lat = current:lat() * 1e-7
+    if not current then log(7, "PYLON: gate no pos"); return false end
+
+    log(7, "PYLON: gate got pos")
+    local raw_lat = current:lat()
+    if not raw_lat then log(7, "PYLON: gate no lat"); return false end
+    local current_lat = raw_lat * 1e-7
     local gate_lat = START_GATE.lat
-    
+    if not gate_lat then log(7, "PYLON: gate no gate_lat"); return false end
+
     -- Determine which side of gate we're on (north or south)
     local current_side = (current_lat > gate_lat) and "north" or "south"
-    
+
     -- Check if we crossed the gate line
     if last_gate_side and last_gate_side ~= current_side then
-        local crossing_direction = (current_side == "north") and "N" or "S"
-        gcs:send_text(6, string.format("PYLON: Gate crossed heading %s", crossing_direction))
+        local dir = "N"
+        if current_side ~= "north" then dir = "S" end
+        local msg = "PYLON: Gate crossed heading " .. dir
+        if type(msg) == "string" then gcs:send_text(6, msg) end
         last_gate_side = current_side
         return true
     end
-    
+
     last_gate_side = current_side
     return false
 end
@@ -140,14 +155,25 @@ end
 -- ============================================================================
 
 function set_navigation_target(target_lat, target_lon, alt_m)
+    log(7, "PYLON: set_nav enter")
+    local current = get_position()
+    if not current then log(6, "PYLON: set_nav no position"); return false end
+    log(7, "PYLON: set_nav make_location")
     local target = make_location(target_lat, target_lon, alt_m or TARGET_ALTITUDE)
-    
-    if not vehicle:update_target_location(target) then
-        gcs:send_text(6, "PYLON: Nav update failed")
+    log(7, "PYLON: set_nav update_target_location")
+    local ok = vehicle:update_target_location(current, target)
+    if not ok then
+        -- Plane may only accept set_target_location( target ) during NAV_SCRIPT_TIME
+        log(6, "PYLON: update_target_location failed, try set_target_location")
+        ok = vehicle:set_target_location(target)
+    end
+    if not ok then
+        log(6, "PYLON: Nav update failed (both APIs)")
         return false
     end
-    
+    log(7, "PYLON: set_nav set_airspeed")
     vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
+    log(7, "PYLON: set_nav ok")
     return true
 end
 
@@ -155,16 +181,21 @@ end
 function get_lookahead_target(current_idx, next_idx)
     local current_wp = course[current_idx + 1]
     local next_wp = course[next_idx + 1]
-    
-    if not current_wp or not next_wp then
+
+    if not current_wp then return 0, 0 end
+    if not next_wp then return current_wp.lat, current_wp.lon end
+
+    -- When approaching SE (index 4), do not blend toward gate until we reach SE.
+    -- Otherwise the target pulls south toward the gate and the plane never turns west at SE.
+    if current_idx == 4 then
         return current_wp.lat, current_wp.lon
     end
-    
+
     local dist = get_distance_to(current_wp.lat, current_wp.lon)
     if not dist then
         return current_wp.lat, current_wp.lon
     end
-    
+
     -- Blend when within lookahead distance
     if dist < LOOKAHEAD_DIST then
         local blend = math.max(0, math.min(1, 1.0 - (dist / LOOKAHEAD_DIST)))
@@ -172,7 +203,7 @@ function get_lookahead_target(current_idx, next_idx)
         local lon = current_wp.lon + blend * (next_wp.lon - current_wp.lon)
         return lat, lon
     end
-    
+
     return current_wp.lat, current_wp.lon
 end
 
@@ -199,6 +230,7 @@ function validate_corner(corner_idx)
 end
 
 function advance_target()
+    log(7, "PYLON: advance_target enter")
     -- Validate current corner
     if current_target_idx > 0 then  -- Don't validate gate
         validate_corner(current_target_idx)
@@ -210,6 +242,7 @@ function advance_target()
     
     -- Check if we completed a lap (returned to start gate)
     if current_target_idx == 0 then
+        log(7, "PYLON: advance at gate check_crossing")
         -- Check for gate crossing
         if check_gate_crossing() then
             current_lap = current_lap + 1
@@ -242,24 +275,26 @@ function advance_target()
 end
 
 function update_race()
+    if (millis() % 2000) < 100 then log(7, "PYLON: update_race tick") end
     if not race_active then return end
-    
+
     local target = course[current_target_idx + 1]
-    if not target then return end
-    
-    -- Get distance to current target
+    if not target then log(6, "PYLON: update_race no target"); return end
+
+    log(7, "PYLON: update_race get_distance")
     local dist = get_distance_to(target.lat, target.lon)
-    if not dist then return end
-    
-    -- Calculate lookahead navigation point
+    if not dist then log(6, "PYLON: update_race no dist"); return end
+
+    log(7, "PYLON: update_race lookahead")
     local next_idx = (current_target_idx + 1) % 5
     local nav_lat, nav_lon = get_lookahead_target(current_target_idx, next_idx)
-    
-    -- Update navigation
+
+    log(7, "PYLON: update_race set_nav")
     set_navigation_target(nav_lat, nav_lon)
-    
-    -- Check if reached target
+
+    log(7, "PYLON: update_race check radius")
     if dist < TURN_RADIUS then
+        log(7, "PYLON: update_race advance_target")
         advance_target()
     end
     
@@ -271,13 +306,14 @@ function update_race()
 end
 
 function start_race(id, cmd, arg1, arg2)
+    log(6, "PYLON: start_race enter")
     script_id = id
     lap_count = math.floor(arg1)
-    
+
     if lap_count <= 0 then
         lap_count = DEFAULT_LAP_COUNT
     end
-    
+
     current_lap = 0
     current_target_idx = 0  -- Start at gate
     race_active = true
@@ -285,19 +321,23 @@ function start_race(id, cmd, arg1, arg2)
     lap_start_times[1] = millis()
     corner_validated = {}
     last_gate_side = nil
-    
+
+    log(6, "PYLON: start_race state set")
     gcs:send_text(3, "========== PYLON RACE START ==========")
     gcs:send_text(3, string.format("%d lap oval race @ %.1fm/s", lap_count, CRUISE_SPEED))
     gcs:send_text(6, "PYLON: Approaching start gate...")
+    log(6, "PYLON: start_race done")
 end
 
 function finish_race()
+    log(6, "PYLON: finish_race enter")
     if script_id >= 0 then
         vehicle:nav_script_time_done(script_id)
     end
     race_active = false
     script_id = -1
     gcs:send_text(3, "PYLON: Race finished, resuming mission")
+    log(6, "PYLON: finish_race done")
 end
 
 -- ============================================================================
@@ -305,19 +345,17 @@ end
 -- ============================================================================
 
 function update()
-    -- Check if AUTO mode has a NAV_SCRIPT_TIME command for us
     local id, cmd, arg1, arg2 = vehicle:nav_script_time()
-    
+
     if id and id ~= script_id then
-        -- New NAV_SCRIPT_TIME command detected
+        log(6, "PYLON: update new NAV_SCRIPT_TIME")
         start_race(id, cmd, arg1, arg2)
     end
-    
-    -- Update race if active
+
     if race_active then
         update_race()
     end
-    
+
     return update, math.floor(1000 / UPDATE_RATE_HZ)
 end
 
@@ -325,8 +363,8 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v3.1 (AUTO mode)")
+gcs:send_text(6, "PYLON RACE: Loaded v3.2 (AUTO mode, debug log)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
-gcs:send_text(6, string.format("PYLON: Default %d laps @ %.1fm/s (cruise from param)", DEFAULT_LAP_COUNT, CRUISE_SPEED))
+gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
 
 return update()
