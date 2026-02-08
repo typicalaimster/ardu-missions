@@ -75,14 +75,16 @@ The oval race course uses the following coordinates:
 ✅ Home position set correctly  
 ✅ Battery fully charged  
 ✅ Wind conditions acceptable (< 15mph recommended)  
-✅ GCS connected and receiving telemetry  
+✅ Yaapu Telemetry Ready!  
 
 ### First Test Flight
+
+**Don't fly over the pits!** 
 
 1. Use `pylon_race_test_2laps.waypoints` for initial testing
 2. Manually position aircraft near race start area
 3. Switch to AUTO mode
-4. Monitor GCS messages for race progress
+4. Monitor messages for race progress
 5. Be ready to switch modes if needed
 
 ---
@@ -96,7 +98,7 @@ The oval race course uses the following coordinates:
 **Waypoints**:
 - WP0: Home location (auto-set)
 - WP1: NAV_SCRIPT_TIME (2 laps, 600s timeout) - Race starts immediately
-- WP2: RTL (Return to launch)
+- WP2: RTL (Return to launch) (DANGER! This can put you over the pits!)
 
 **Use when**:
 - First time testing the script
@@ -121,7 +123,7 @@ The oval race course uses the following coordinates:
 - WP2: Navigate to south of start gate (pre-race positioning)
 - WP3: NAV_SCRIPT_TIME (5 laps, 600s timeout) - RACE STARTS HERE
 - WP4: Navigate away from race area  
-- WP5: RTL (Return to launch)
+- WP5: RTL (Return to launch) (DANGER! This could put you over the pits!)
 
 **Use when**:
 - Standard operations
@@ -146,7 +148,7 @@ The oval race course uses the following coordinates:
 - WP2: Navigate to south of start gate (lower approach at 12m)
 - WP3: NAV_SCRIPT_TIME (5 laps, 600s timeout) - RACE
 - WP4: Exit race area
-- WP5: LAND at home location
+- WP5: LAND at home location (DANGER! You could land in the pits!)
 
 **Use when**:
 - Competition day
