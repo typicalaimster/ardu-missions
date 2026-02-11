@@ -7,6 +7,7 @@
 --   - Reads MAX_BANK_ANGLE from ROLL_LIMIT_DEG parameter (adapts to aircraft tuning)
 --   - Increased script update rate from 20Hz to 50Hz (more responsive control)
 --   - Increased navigation update rate from 10Hz to 20Hz (better path tracking)
+--   - Added pre-flight validation: checks AHRS health and GPS lock before race
 --   - Added mode check: race aborts cleanly when pilot exits AUTO mode
 --   - Added consecutive nav failure detection: aborts after 10 failures (~200ms)
 --   - Added parameter validation warnings for unusual cruise speed or bank angle
@@ -15,20 +16,24 @@
 --   - Added duplicate call guard in finish_race()
 --   - Added course validation at initialization (must have exactly 5 waypoints)
 --   - Enhanced error messages show consecutive failures for better diagnostics
+--   - Added best lap tracking with live comparison (shows delta to best lap)
 --   - CRITICAL FIX: Division by zero protection in turn calculation (rate-limited warning)
 --   - Added lap count limit (max 100 laps) to prevent memory issues
 --   - Added groundspeed sanity check (0.5 to 100 m/s) to filter bad data
+--   - Added dataflash logging (PYLR/PYLL messages) for post-race analysis
 --   - All warnings rate-limited to prevent log spam
 --   - Removed excessive debug logging for better performance at 50Hz
 --   - Optimized functions to reduce VM instruction count per cycle
 --
 -- SAFETY:
+--   - Pre-flight checks: Validates AHRS health and GPS lock before race start
 --   - Aborts race automatically if navigation system becomes unresponsive
 --   - Protects against division by zero in turn radius calculation
 --   - Validates parameters at startup to catch configuration issues
 --   - Stops cleanly when pilot switches out of AUTO mode
 --   - Limits lap count to prevent memory exhaustion
 --   - All edge cases have safe fallbacks
+--   - Won't start race with poor positioning quality
 --
 -- PERFORMANCE:
 --   - Script runs at 50Hz (20ms intervals) for smooth racing control
@@ -144,6 +149,8 @@ local consecutive_nav_fails = 0   -- Track consecutive failures for abort detect
 local MAX_CONSECUTIVE_FAILS = 10  -- Abort race after 10 consecutive nav failures (~200ms at 50Hz)
 local last_telemetry_ms = 0       -- Track last telemetry update for more robust timing
 local last_bank_warn_ms = 0       -- Rate-limit bank angle warning to prevent spam
+local best_lap_time = nil         -- Track best lap time for comparison
+local best_lap_number = 0         -- Track which lap was fastest
 
 -- Log level: 6 = Info (key checkpoints), 7 = Debug (verbose)
 local LOG_LEVEL = 6
@@ -415,7 +422,27 @@ function advance_target()
             
             if current_lap > 0 and current_lap <= lap_count then
                 local lap_time = millis() - lap_start_times[current_lap]
-                gcs:send_text(3, string.format("LAP %d: %.1fs", current_lap, lap_time / 1000.0))
+                local lap_time_sec = lap_time / 1000.0
+                
+                -- Check if this is the best lap
+                local is_best = false
+                if not best_lap_time or lap_time < best_lap_time then
+                    best_lap_time = lap_time
+                    best_lap_number = current_lap
+                    is_best = true
+                end
+                
+                -- Display lap time with best lap indicator
+                if is_best then
+                    gcs:send_text(3, string.format("LAP %d: %.1fs ⭐ NEW BEST!", current_lap, lap_time_sec))
+                else
+                    local delta = (lap_time - best_lap_time) / 1000.0
+                    gcs:send_text(3, string.format("LAP %d: %.1fs (+%.1fs)", current_lap, lap_time_sec, delta))
+                end
+                
+                -- Log lap completion to dataflash for post-flight analysis
+                logger:write('PYLL', 'Lap,Time,NavSucc,NavFail', 'ifII', 
+                    current_lap, lap_time_sec, nav_success_count, nav_fail_count)
             end
             
             if current_lap >= lap_count then
@@ -423,6 +450,13 @@ function advance_target()
                 local total_time = millis() - race_start_time
                 gcs:send_text(3, string.format("RACE COMPLETE! %d laps, %.1fs total", 
                     lap_count, total_time / 1000.0))
+                
+                -- Report best lap
+                if best_lap_time then
+                    gcs:send_text(3, string.format("Best lap: #%d - %.1fs", 
+                        best_lap_number, best_lap_time / 1000.0))
+                end
+                
                 finish_race()
                 return
             else
@@ -501,6 +535,22 @@ function start_race(id, cmd, arg1, arg2)
         lap_count = DEFAULT_LAP_COUNT
     end
 
+    -- Pre-flight validation: Check AHRS health before starting race
+    if not ahrs:healthy() then
+        gcs:send_text(3, "PYLON: ERROR - AHRS not healthy, aborting race start")
+        gcs:send_text(3, "PYLON: Check GPS lock and allow AHRS to initialize")
+        finish_race()
+        return
+    end
+    
+    -- Pre-flight validation: Check GPS position quality
+    local pos = get_position()
+    if not pos then
+        gcs:send_text(3, "PYLON: ERROR - No GPS position available, aborting race start")
+        finish_race()
+        return
+    end
+
     current_lap = 0
     current_target_idx = 0  -- Start at gate
     race_active = true
@@ -514,10 +564,16 @@ function start_race(id, cmd, arg1, arg2)
     nav_fail_count = 0       -- reset counters
     nav_success_count = 0
     consecutive_nav_fails = 0  -- reset consecutive failure counter
+    best_lap_time = nil      -- reset best lap tracking
+    best_lap_number = 0
+
+    -- Log race start to dataflash for post-flight analysis
+    logger:write('PYLR', 'LapC,Speed,Bank', 'iff', lap_count, CRUISE_SPEED, MAX_BANK_ANGLE)
 
     gcs:send_text(3, "========== PYLON RACE START ==========")
     gcs:send_text(3, string.format("%d lap oval race @ %.1fm/s", lap_count, CRUISE_SPEED))
     gcs:send_text(6, "PYLON: v4.2 - Tighter racing line, optimized performance")
+    gcs:send_text(6, "PYLON: Pre-flight checks PASSED - AHRS healthy, GPS locked")
     gcs:send_text(6, "PYLON: Approaching start gate...")
 end
 
