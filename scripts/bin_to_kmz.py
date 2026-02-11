@@ -40,8 +40,23 @@ except ImportError:
     print("")
 
 
-def create_kml_from_gps_data(gps_points, output_name="FlightTrack"):
-    """Create KML XML from GPS data points."""
+def create_kml_from_gps_data(gps_points, output_name="FlightTrack", include_waypoints=True):
+    """Create KML XML from GPS data points with optional waypoints and pylons."""
+    
+    # Pylon racing course waypoints (from pylon_race_auto_mode.lua)
+    waypoints = [
+        {'name': 'Start Gate', 'lat': 32.76300740, 'lon': -117.21375030, 'color': 'ff00ff00', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/grn-square.png'},
+        {'name': 'SW Corner', 'lat': 32.76304460, 'lon': -117.21412720, 'color': 'ffffff00', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png'},
+        {'name': 'NW Corner', 'lat': 32.76338970, 'lon': -117.21420500, 'color': 'ffffff00', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png'},
+        {'name': 'NE Corner', 'lat': 32.76351600, 'lon': -117.21344860, 'color': 'ffffff00', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png'},
+        {'name': 'SE Corner', 'lat': 32.76310780, 'lon': -117.21337620, 'color': 'ffffff00', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png'},
+    ]
+    
+    # Actual pylons
+    pylons = [
+        {'name': 'West Pylon', 'lat': 32.76314830, 'lon': -117.21414310, 'color': 'ff0000ff', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/red-diamond.png'},
+        {'name': 'East Pylon', 'lat': 32.76326200, 'lon': -117.21341080, 'color': 'ff0000ff', 'icon': 'http://maps.google.com/mapfiles/kml/paddle/red-diamond.png'},
+    ]
     
     # Create KML structure
     kml = ET.Element('kml', xmlns="http://www.opengis.net/kml/2.2")
@@ -58,6 +73,63 @@ def create_kml_from_gps_data(gps_points, output_name="FlightTrack"):
     color.text = 'ff0000ff'  # Red line
     width = ET.SubElement(line_style, 'width')
     width.text = '3'
+    
+    # Create folder for pylons
+    if include_waypoints:
+        pylon_folder = ET.SubElement(document, 'Folder')
+        pylon_folder_name = ET.SubElement(pylon_folder, 'name')
+        pylon_folder_name.text = 'Pylons'
+        
+        for pylon in pylons:
+            # Create style for pylon
+            style_id = f"style_{pylon['name'].replace(' ', '_')}"
+            pylon_style = ET.SubElement(document, 'Style', id=style_id)
+            icon_style = ET.SubElement(pylon_style, 'IconStyle')
+            pylon_color = ET.SubElement(icon_style, 'color')
+            pylon_color.text = pylon['color']
+            pylon_scale = ET.SubElement(icon_style, 'scale')
+            pylon_scale.text = '1.5'
+            icon = ET.SubElement(icon_style, 'Icon')
+            href = ET.SubElement(icon, 'href')
+            href.text = pylon['icon']
+            
+            # Create placemark for pylon
+            pylon_pm = ET.SubElement(pylon_folder, 'Placemark')
+            pylon_pm_name = ET.SubElement(pylon_pm, 'name')
+            pylon_pm_name.text = pylon['name']
+            pylon_style_url = ET.SubElement(pylon_pm, 'styleUrl')
+            pylon_style_url.text = f'#{style_id}'
+            pylon_point = ET.SubElement(pylon_pm, 'Point')
+            pylon_coords = ET.SubElement(pylon_point, 'coordinates')
+            pylon_coords.text = f"{pylon['lon']:.8f},{pylon['lat']:.8f},0"
+        
+        # Create folder for waypoints
+        wp_folder = ET.SubElement(document, 'Folder')
+        wp_folder_name = ET.SubElement(wp_folder, 'name')
+        wp_folder_name.text = 'Course Waypoints'
+        
+        for wp in waypoints:
+            # Create style for waypoint
+            style_id = f"style_{wp['name'].replace(' ', '_')}"
+            wp_style = ET.SubElement(document, 'Style', id=style_id)
+            icon_style = ET.SubElement(wp_style, 'IconStyle')
+            wp_color = ET.SubElement(icon_style, 'color')
+            wp_color.text = wp['color']
+            wp_scale = ET.SubElement(icon_style, 'scale')
+            wp_scale.text = '1.2'
+            icon = ET.SubElement(icon_style, 'Icon')
+            href = ET.SubElement(icon, 'href')
+            href.text = wp['icon']
+            
+            # Create placemark for waypoint
+            wp_pm = ET.SubElement(wp_folder, 'Placemark')
+            wp_pm_name = ET.SubElement(wp_pm, 'name')
+            wp_pm_name.text = wp['name']
+            wp_style_url = ET.SubElement(wp_pm, 'styleUrl')
+            wp_style_url.text = f'#{style_id}'
+            wp_point = ET.SubElement(wp_pm, 'Point')
+            wp_coords = ET.SubElement(wp_point, 'coordinates')
+            wp_coords.text = f"{wp['lon']:.8f},{wp['lat']:.8f},0"
     
     # Create placemark with track
     placemark = ET.SubElement(document, 'Placemark')
@@ -150,17 +222,19 @@ def extract_gps_from_bin(bin_path):
     return gps_points
 
 
-def create_kmz(gps_points, output_path, name="FlightTrack"):
+def create_kmz(gps_points, output_path, name="FlightTrack", include_waypoints=True):
     """Create KMZ file (zipped KML) from GPS points."""
     
     # Generate KML content
-    kml_content = create_kml_from_gps_data(gps_points, name)
+    kml_content = create_kml_from_gps_data(gps_points, name, include_waypoints)
     
     # Create KMZ (ZIP archive with doc.kml inside)
     try:
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as kmz:
             kmz.writestr('doc.kml', kml_content)
         print(f"✓ Created KMZ: {output_path}")
+        if include_waypoints:
+            print(f"  Includes: 2 pylons + 5 course waypoints")
         return True
     except Exception as e:
         print(f"ERROR: Failed to create KMZ: {e}")

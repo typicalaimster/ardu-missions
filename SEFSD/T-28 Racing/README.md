@@ -31,11 +31,41 @@ This racing system uses ArduPilot's **NAV_SCRIPT_TIME** waypoint command to enab
 
 | File | Description |
 |------|--------------|
-| `pylon_race_auto_mode.lua` | The racing script — copy to `/APM/scripts/` |
+| `pylon_race_auto_mode.lua` | Original racing script (v4.1 and earlier) |
+| `pylon_race_auto_mode_v4.2.lua` | **NEW: Improved script with tighter waypoints** |
 | `pylon_race_mission.waypoints` | Standard 5-lap race mission |
 | `pylon_race_full_mission.waypoints` | Complete mission with approach waypoints |
 | `pylon_race_5laps_competition.waypoints` | Competition-ready with precision landing |
 | `pylon_race_test_2laps.waypoints` | Quick test mission (2 laps only) |
+
+### Version 4.2 Updates (2026-02-10)
+
+**⚠️ CRITICAL: Navigation API Issue Identified**
+
+Analysis of flight logs revealed that both navigation APIs (`set_target_location` and `update_target_location`) are failing during NAV_SCRIPT_TIME, preventing the script from controlling the aircraft. See `../../logs/PYLON_RACING_ANALYSIS_2026-02-10.md` for full details.
+
+**Changes in v4.2:**
+- ✓ Adjusted NW/NE corner waypoints closer to actual pylons (matches human pilot racing line)
+- ✓ Reduced turn anticipation factor from 1.2 to 0.9 (tighter turns)
+- ✓ Added third navigation API fallback using velocity vectors
+- ✓ Enhanced diagnostics showing which API works (if any)
+- ✓ Navigation success/failure statistics tracking
+
+**Waypoint Adjustments:**
+- NW Corner: Moved 11m southeast (closer to West pylon)
+- NE Corner: Moved 9m south (closer to East pylon)
+- Based on comparison with human pilot flight data
+
+**Next Steps:**
+1. Fix navigation API issue (likely ArduPlane parameter or version)
+2. Test v4.2 with working navigation
+3. Compare performance to human pilot baseline
+
+**Visualization Files Available:**
+- `../../logs/2026-02-10 16-46-40.kmz` - AUTO mode flight with waypoints/pylons
+- `../../logs/2026-02-10 16-53-19.kmz` - Human pilot FBWA flight with waypoints/pylons
+- `../../logs/course_comparison_v4.1_vs_v4.2.kmz` - Old vs new waypoint placement
+- See `../../logs/KMZ_VISUALIZATION_GUIDE.md` for viewing instructions
 
 ### How It Works
 

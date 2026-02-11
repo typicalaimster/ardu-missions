@@ -1,5 +1,11 @@
--- Pylon Racing Script for ArduPilot AUTO Mode
+-- Pylon Racing Script for ArduPilot AUTO Mode - v4.2
 -- Works with NAV_SCRIPT_TIME mission command
+--
+-- CHANGES IN v4.2:
+--   - Adjusted waypoints to match human racing line (tighter around pylons)
+--   - Reduced turn anticipation factor from 1.2 to 0.9 (turn later, tighter line)
+--   - Added diagnostic logging for navigation API failures
+--   - Attempted use of set_target_velocity_NED as fallback
 --
 -- Mission Setup:
 --   WP1: Start gate or pre-race position
@@ -37,26 +43,27 @@ local TARGET_ALTITUDE = 9.13     -- meters AGL (30 feet)
 -- Physics-based turn configuration
 local GRAVITY = 9.81             -- m/s^2
 local MAX_BANK_ANGLE = 45.0      -- degrees - maximum bank angle for racing turns
-local TURN_ANTICIPATION_FACTOR = 1.2  -- multiplier for early turn initiation (>1.0 = turn earlier)
+local TURN_ANTICIPATION_FACTOR = 0.9  -- REDUCED from 1.2 - turn later for tighter racing line
 local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate corner
 local LOOKAHEAD_TIME = 1.5       -- seconds - how far ahead to blend toward next waypoint
 
 -- ============================================================================
--- COURSE DEFINITION
+-- COURSE DEFINITION (ADJUSTED FOR TIGHTER RACING LINE)
 -- ============================================================================
 
--- Pylon reference locations
+-- Pylon reference locations (actual physical pylons)
 local WEST_PYLON = {lat = 32.76314830, lon = -117.21414310}
 local EAST_PYLON = {lat = 32.76326200, lon = -117.21341080}
 
 -- Start gate
 local START_GATE = {lat = 32.76300740, lon = -117.21375030, name = "GATE"}
 
--- Corner waypoints (from your current mission)
-local WP2_SW = {lat = 32.76304460, lon = -117.21412720, name = "SW"}  -- S of West
-local WP3_NW = {lat = 32.76338970, lon = -117.21420500, name = "NW"}  -- N of West  
-local WP4_NE = {lat = 32.76351600, lon = -117.21344860, name = "NE"}  -- N of East
-local WP6_SE = {lat = 32.76310780, lon = -117.21337620, name = "SE"}  -- S of East
+-- Corner waypoints - ADJUSTED to match human racing line
+-- Analysis showed human pilot flies tighter around actual pylons
+local WP2_SW = {lat = 32.76304460, lon = -117.21412720, name = "SW"}  -- S of West (keep as is)
+local WP3_NW = {lat = 32.76325000, lon = -117.21416000, name = "NW"}  -- ADJUSTED: Tighter to West pylon
+local WP4_NE = {lat = 32.76340000, lon = -117.21342500, name = "NE"}  -- ADJUSTED: Tighter to East pylon  
+local WP6_SE = {lat = 32.76310780, lon = -117.21337620, name = "SE"}  -- S of East (keep as is)
 
 -- Oval course sequence
 local course = {START_GATE, WP2_SW, WP3_NW, WP4_NE, WP6_SE}
@@ -77,6 +84,8 @@ local last_gate_side = nil        -- Track which side of gate we're on
 local last_nav_update_ms = 0      -- Throttle nav updates to vehicle
 local last_nav_fail_log_ms = 0    -- Rate-limit "both APIs" failure log
 local NAV_UPDATE_INTERVAL_MS = 100  -- 10 Hz nav updates (Plane may reject if too fast)
+local nav_fail_count = 0          -- Track total navigation failures
+local nav_success_count = 0       -- Track successful navigation updates
 
 -- Log level: 6 = Info (key checkpoints), 7 = Debug (verbose)
 local LOG_LEVEL = 6
@@ -156,18 +165,20 @@ function check_gate_crossing()
 end
 
 -- ============================================================================
--- NAVIGATION FUNCTIONS
+-- NAVIGATION FUNCTIONS (ENHANCED WITH DIAGNOSTICS)
 -- ============================================================================
 
 function set_navigation_target(target_lat, target_lon, alt_m)
     log(7, "PYLON: set_nav enter")
     local current = get_position()
     if not current then log(6, "PYLON: set_nav no position"); return false end
+    
     -- Reject invalid target (e.g. 0,0 from lookahead edge case)
     if (target_lat == 0 and target_lon == 0) then
         log(6, "PYLON: set_nav invalid target 0,0")
         return false
     end
+    
     log(7, "PYLON: set_nav make_location")
     local target = make_location(target_lat, target_lon, alt_m or TARGET_ALTITUDE)
 
@@ -178,27 +189,62 @@ function set_navigation_target(target_lat, target_lon, alt_m)
         return true  -- assume previous target still active
     end
 
-    -- Plane typically accepts only set_target_location(target) during NAV_SCRIPT_TIME
-    -- Try it first, then fall back to update_target_location(current, target)
+    -- ATTEMPT 1: Try set_target_location (preferred for NAV_SCRIPT_TIME)
     log(7, "PYLON: set_nav set_target_location")
     local ok = vehicle:set_target_location(target)
-    if not ok then
-        log(7, "PYLON: set_target_location failed, try update_target_location")
-        ok = vehicle:update_target_location(current, target)
+    
+    if ok then
+        last_nav_update_ms = now_ms
+        nav_success_count = nav_success_count + 1
+        log(7, "PYLON: set_nav OK via set_target_location")
+        vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
+        return true
     end
-    if not ok then
-        -- Log at most once per second to avoid flooding telemetry
-        if (now_ms - last_nav_fail_log_ms) >= 1000 then
-            log(6, "PYLON: Nav update failed (both APIs)")
-            last_nav_fail_log_ms = now_ms
+    
+    -- ATTEMPT 2: Try update_target_location as fallback
+    log(7, "PYLON: set_target_location failed, try update_target_location")
+    ok = vehicle:update_target_location(current, target)
+    
+    if ok then
+        last_nav_update_ms = now_ms
+        nav_success_count = nav_success_count + 1
+        log(7, "PYLON: set_nav OK via update_target_location")
+        vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
+        return true
+    end
+    
+    -- ATTEMPT 3: Try setting velocity vector toward target (experimental)
+    local bearing = get_bearing_to(target_lat, target_lon)
+    if bearing then
+        local bearing_rad = math.rad(bearing)
+        local vel_north = CRUISE_SPEED * math.cos(bearing_rad)
+        local vel_east = CRUISE_SPEED * math.sin(bearing_rad)
+        local vel_down = 0
+        
+        log(7, "PYLON: Trying set_target_velocity_NED")
+        ok = vehicle:set_target_velocity_NED(Vector3f(vel_north, vel_east, vel_down))
+        
+        if ok then
+            last_nav_update_ms = now_ms
+            nav_success_count = nav_success_count + 1
+            log(6, "PYLON: Nav via velocity vector (bearing=" .. string.format("%.0f", bearing) .. "°)")
+            return true
         end
-        return false
     end
-    last_nav_update_ms = now_ms
-    log(7, "PYLON: set_nav set_airspeed")
-    vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
-    log(7, "PYLON: set_nav ok")
-    return true
+    
+    -- ALL ATTEMPTS FAILED
+    nav_fail_count = nav_fail_count + 1
+    
+    -- Log diagnostic info (rate-limited to once per second)
+    if (now_ms - last_nav_fail_log_ms) >= 1000 then
+        local mode = vehicle:get_mode()
+        local msg = string.format("PYLON: Nav FAIL (all 3 APIs) mode=%d fails=%d success=%d", 
+                                  mode, nav_fail_count, nav_success_count)
+        log(6, msg)
+        last_nav_fail_log_ms = now_ms
+    end
+    
+    return false
 end
 
 -- Calculate physics-based turn radius for current conditions
@@ -210,10 +256,11 @@ function calculate_turn_anticipation()
     local bank_rad = math.rad(MAX_BANK_ANGLE)
     local turn_radius = (groundspeed * groundspeed) / (GRAVITY * math.tan(bank_rad))
     
-    -- Apply anticipation factor to turn earlier (compensates for response lag)
+    -- Apply anticipation factor to turn earlier/later
+    -- v4.2: Reduced from 1.2 to 0.9 for tighter racing line
     local anticipation = turn_radius * TURN_ANTICIPATION_FACTOR
     
-    -- Clamp to reasonable bounds (don't turn too early or too late)
+    -- Clamp to reasonable bounds
     return math.max(15.0, math.min(50.0, anticipation))
 end
 
@@ -232,7 +279,6 @@ function get_lookahead_target(current_idx, next_idx)
     end
 
     -- Calculate lookahead distance based on groundspeed and time
-    -- Faster = look farther ahead for smoother racing line
     local groundspeed = get_groundspeed()
     local lookahead_dist = groundspeed * LOOKAHEAD_TIME
     
@@ -366,16 +412,28 @@ function start_race(id, cmd, arg1, arg2)
     last_gate_side = nil
     last_nav_update_ms = 0   -- allow first nav update immediately
     last_nav_fail_log_ms = 0 -- allow one failure log right away if needed
+    nav_fail_count = 0       -- reset counters
+    nav_success_count = 0
 
     log(6, "PYLON: start_race state set")
     gcs:send_text(3, "========== PYLON RACE START ==========")
     gcs:send_text(3, string.format("%d lap oval race @ %.1fm/s", lap_count, CRUISE_SPEED))
+    gcs:send_text(6, "PYLON: v4.2 - Tighter racing line, better nav diagnostics")
     gcs:send_text(6, "PYLON: Approaching start gate...")
     log(6, "PYLON: start_race done")
 end
 
 function finish_race()
     log(6, "PYLON: finish_race enter")
+    
+    -- Report navigation statistics
+    local total_attempts = nav_success_count + nav_fail_count
+    if total_attempts > 0 then
+        local success_rate = (nav_success_count * 100.0) / total_attempts
+        gcs:send_text(6, string.format("PYLON: Nav stats: %d/%d successful (%.0f%%)", 
+                                       nav_success_count, total_attempts, success_rate))
+    end
+    
     if script_id >= 0 then
         vehicle:nav_script_time_done(script_id)
     end
@@ -408,10 +466,11 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v4.1 (Plane nav API order, 10Hz throttle, rate-limited log)")
+gcs:send_text(6, "PYLON RACE: Loaded v4.2 (Tighter racing line, nav diagnostics)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
 gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
-gcs:send_text(6, string.format("PYLON: Bank=%.0f° Anticipation=%.1fx Lookahead=%.1fs", 
+gcs:send_text(6, string.format("PYLON: Bank=%.0f° Anticipation=%.1fx (REDUCED) Lookahead=%.1fs", 
     MAX_BANK_ANGLE, TURN_ANTICIPATION_FACTOR, LOOKAHEAD_TIME))
+gcs:send_text(6, "PYLON: NW/NE waypoints adjusted closer to pylons")
 
 return update()
