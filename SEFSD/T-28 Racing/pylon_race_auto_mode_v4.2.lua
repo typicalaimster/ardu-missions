@@ -117,10 +117,10 @@ local START_GATE = {lat = 32.76300740, lon = -117.21375030, name = "GATE"}
 local WP2_SW = {lat = 32.76304460, lon = -117.21412720, name = "SW"}  -- S of West (keep as is)
 local WP3_NW = {lat = 32.76325000, lon = -117.21416000, name = "NW"}  -- ADJUSTED: Tighter to West pylon
 local WP4_NE = {lat = 32.76340000, lon = -117.21342500, name = "NE"}  -- ADJUSTED: Tighter to East pylon  
-local WP6_SE = {lat = 32.76310780, lon = -117.21337620, name = "SE"}  -- S of East (keep as is)
+local WP5_SE = {lat = 32.76310780, lon = -117.21337620, name = "SE"}  -- S of East (keep as is)
 
 -- Oval course sequence
-local course = {START_GATE, WP2_SW, WP3_NW, WP4_NE, WP6_SE}
+local course = {START_GATE, WP2_SW, WP3_NW, WP4_NE, WP5_SE}
 
 -- ============================================================================
 -- INTERNAL STATE
