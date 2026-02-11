@@ -8,10 +8,27 @@
 --   - Increased script update rate from 20Hz to 50Hz (more responsive control)
 --   - Increased navigation update rate from 10Hz to 20Hz (better path tracking)
 --   - Added mode check: race aborts cleanly when pilot exits AUTO mode
---   - Added diagnostic logging for navigation API failures
---   - Attempted use of set_target_velocity_NED as fallback
+--   - Added consecutive nav failure detection: aborts after 10 failures (~200ms)
+--   - Added parameter validation warnings for unusual cruise speed or bank angle
+--   - Improved lookahead fallback: returns START_GATE instead of 0,0
+--   - More robust telemetry timing using timestamp tracking
+--   - Added duplicate call guard in finish_race()
+--   - Added course validation at initialization (must have exactly 5 waypoints)
+--   - Enhanced error messages show consecutive failures for better diagnostics
+--   - CRITICAL FIX: Division by zero protection in turn calculation (rate-limited warning)
+--   - Added lap count limit (max 100 laps) to prevent memory issues
+--   - Added groundspeed sanity check (0.5 to 100 m/s) to filter bad data
+--   - All warnings rate-limited to prevent log spam
 --   - Removed excessive debug logging for better performance at 50Hz
 --   - Optimized functions to reduce VM instruction count per cycle
+--
+-- SAFETY:
+--   - Aborts race automatically if navigation system becomes unresponsive
+--   - Protects against division by zero in turn radius calculation
+--   - Validates parameters at startup to catch configuration issues
+--   - Stops cleanly when pilot switches out of AUTO mode
+--   - Limits lap count to prevent memory exhaustion
+--   - All edge cases have safe fallbacks
 --
 -- PERFORMANCE:
 --   - Script runs at 50Hz (20ms intervals) for smooth racing control
@@ -24,7 +41,7 @@
 -- Mission Setup:
 --   WP1: Start gate or pre-race position
 --   WP2: NAV_SCRIPT_TIME (timeout=600, arg1=num_laps, arg2=0)
---   WP3: Post-race waypoint (RTL, land, etc.)
+--   WP3: Post-race waypoint (RTL, land, etc.) - IMPORTANT: Make WP3 safe!
 --
 -- Course Pattern (Clockwise Oval):
 --   START GATE → SW corner → NW corner → NE corner → SE corner → START GATE
@@ -69,6 +86,14 @@ local MAX_BANK_ANGLE = get_max_bank_angle()
 local DEFAULT_LAP_COUNT = 5      -- default laps (overridden by arg1)
 local UPDATE_RATE_HZ = 50        -- script update rate (50Hz for responsive racing control)
 local TARGET_ALTITUDE = 10.0     -- meters AGL (~33 feet)
+
+-- Validate parameters are reasonable
+if CRUISE_SPEED < 10 or CRUISE_SPEED > 50 then
+    gcs:send_text(3, string.format("PYLON: WARNING - Unusual cruise speed %.1fm/s", CRUISE_SPEED))
+end
+if MAX_BANK_ANGLE < 20 or MAX_BANK_ANGLE > 60 then
+    gcs:send_text(3, string.format("PYLON: WARNING - Unusual bank angle %.0f°", MAX_BANK_ANGLE))
+end
 
 -- Physics-based turn configuration
 local GRAVITY = 9.81             -- m/s^2
@@ -115,6 +140,10 @@ local last_nav_fail_log_ms = 0    -- Rate-limit "both APIs" failure log
 local NAV_UPDATE_INTERVAL_MS = 50  -- 20Hz nav updates (was 100ms/10Hz, increased for better racing precision)
 local nav_fail_count = 0          -- Track total navigation failures
 local nav_success_count = 0       -- Track successful navigation updates
+local consecutive_nav_fails = 0   -- Track consecutive failures for abort detection
+local MAX_CONSECUTIVE_FAILS = 10  -- Abort race after 10 consecutive nav failures (~200ms at 50Hz)
+local last_telemetry_ms = 0       -- Track last telemetry update for more robust timing
+local last_bank_warn_ms = 0       -- Rate-limit bank angle warning to prevent spam
 
 -- Log level: 6 = Info (key checkpoints), 7 = Debug (verbose)
 local LOG_LEVEL = 6
@@ -158,7 +187,11 @@ end
 function get_groundspeed()
     local vel = ahrs:get_velocity_NED()
     if vel then
-        return math.sqrt(vel:x()*vel:x() + vel:y()*vel:y())
+        local gs = math.sqrt(vel:x()*vel:x() + vel:y()*vel:y())
+        -- Sanity check: ground speed should be reasonable
+        if gs > 0.5 and gs < 100 then  -- 0.5 to 100 m/s
+            return gs
+        end
     end
     return CRUISE_SPEED
 end
@@ -220,6 +253,7 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     if ok then
         last_nav_update_ms = now_ms
         nav_success_count = nav_success_count + 1
+        consecutive_nav_fails = 0  -- Reset consecutive failure counter on success
         vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
         return true
     end
@@ -230,6 +264,7 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     if ok then
         last_nav_update_ms = now_ms
         nav_success_count = nav_success_count + 1
+        consecutive_nav_fails = 0  -- Reset consecutive failure counter on success
         vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
         return true
     end
@@ -247,6 +282,7 @@ function set_navigation_target(target_lat, target_lon, alt_m)
         if ok then
             last_nav_update_ms = now_ms
             nav_success_count = nav_success_count + 1
+            consecutive_nav_fails = 0  -- Reset consecutive failure counter on success
             -- Only log success on velocity mode (indicates fallback working)
             if (now_ms - last_nav_fail_log_ms) >= 5000 then
                 gcs:send_text(6, "PYLON: Nav via velocity vector (bearing=" .. string.format("%.0f", bearing) .. "°)")
@@ -258,12 +294,20 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     
     -- ALL ATTEMPTS FAILED
     nav_fail_count = nav_fail_count + 1
+    consecutive_nav_fails = consecutive_nav_fails + 1
+    
+    -- CRITICAL: Check if we've lost navigation completely
+    if consecutive_nav_fails >= MAX_CONSECUTIVE_FAILS then
+        gcs:send_text(3, string.format("PYLON: ABORTING - Navigation system unresponsive (%d consecutive failures)", consecutive_nav_fails))
+        finish_race()
+        return false
+    end
     
     -- Log diagnostic info (rate-limited to once per second)
     if (now_ms - last_nav_fail_log_ms) >= 1000 then
         local mode = vehicle:get_mode()
-        gcs:send_text(6, string.format("PYLON: Nav FAIL (all 3 APIs) mode=%d fails=%d success=%d", 
-                                  mode, nav_fail_count, nav_success_count))
+        gcs:send_text(6, string.format("PYLON: Nav FAIL (all 3 APIs) mode=%d fails=%d/%d success=%d", 
+                                  mode, consecutive_nav_fails, nav_fail_count, nav_success_count))
         last_nav_fail_log_ms = now_ms
     end
     
@@ -275,8 +319,19 @@ end
 function calculate_turn_anticipation()
     local groundspeed = get_groundspeed()
     
-    -- Physics: turn_radius = v^2 / (g * tan(bank_angle))
+    -- Protect against division by zero (bank angle too small)
     local bank_rad = math.rad(MAX_BANK_ANGLE)
+    if bank_rad < 0.01 then  -- ~0.57 degrees
+        -- Rate-limit warning to prevent spam (once per 5 seconds max)
+        local now_ms = millis()
+        if now_ms - last_bank_warn_ms > 5000 then
+            gcs:send_text(6, "PYLON: WARNING - Bank angle too small for safe turn calculation")
+            last_bank_warn_ms = now_ms
+        end
+        return 50.0  -- Max turn radius (conservative)
+    end
+    
+    -- Physics: turn_radius = v^2 / (g * tan(bank_angle))
     local turn_radius = (groundspeed * groundspeed) / (GRAVITY * math.tan(bank_rad))
     
     -- Apply anticipation factor to turn earlier/later
@@ -291,10 +346,15 @@ end
 -- This creates a smooth racing line by blending toward the next waypoint
 function get_lookahead_target(current_idx, next_idx)
     local current_wp = course[current_idx + 1]
+    if not current_wp then 
+        -- Safe fallback to start gate if waypoint invalid
+        return START_GATE.lat, START_GATE.lon
+    end
+    
     local next_wp = course[next_idx + 1]
-
-    if not current_wp then return 0, 0 end
-    if not next_wp then return current_wp.lat, current_wp.lon end
+    if not next_wp then 
+        return current_wp.lat, current_wp.lon 
+    end
 
     local dist = get_distance_to(current_wp.lat, current_wp.lon)
     if not dist then
@@ -420,9 +480,10 @@ function update_race()
         advance_target()
     end
     
-    -- Periodic telemetry (every 2 seconds, not every update)
-    -- Using modulo on millis() is lightweight for timing checks
-    if millis() % 2000 < 50 then  -- Changed from < 100 to < 50 for 50Hz rate
+    -- Periodic telemetry using timestamp tracking (more robust than modulo)
+    local now_ms = millis()
+    if now_ms - last_telemetry_ms > 2000 then
+        last_telemetry_ms = now_ms
         local gs = get_groundspeed()
         gcs:send_text(7, string.format("PYLON: L%d %s %.0fm (GS:%.1fm/s R:%.0fm)", 
             current_lap + 1, target.name, dist, gs, turn_anticipation))
@@ -435,6 +496,9 @@ function start_race(id, cmd, arg1, arg2)
 
     if lap_count <= 0 then
         lap_count = DEFAULT_LAP_COUNT
+    elseif lap_count > 100 then
+        gcs:send_text(3, string.format("PYLON: WARNING - Lap count %d exceeds limit, using %d", lap_count, DEFAULT_LAP_COUNT))
+        lap_count = DEFAULT_LAP_COUNT
     end
 
     current_lap = 0
@@ -446,8 +510,10 @@ function start_race(id, cmd, arg1, arg2)
     last_gate_side = nil
     last_nav_update_ms = 0   -- allow first nav update immediately
     last_nav_fail_log_ms = 0 -- allow one failure log right away if needed
+    last_telemetry_ms = 0    -- reset telemetry timer
     nav_fail_count = 0       -- reset counters
     nav_success_count = 0
+    consecutive_nav_fails = 0  -- reset consecutive failure counter
 
     gcs:send_text(3, "========== PYLON RACE START ==========")
     gcs:send_text(3, string.format("%d lap oval race @ %.1fm/s", lap_count, CRUISE_SPEED))
@@ -456,6 +522,9 @@ function start_race(id, cmd, arg1, arg2)
 end
 
 function finish_race()
+    -- Guard against duplicate calls
+    if not race_active then return end
+    
     -- Report navigation statistics
     local total_attempts = nav_success_count + nav_fail_count
     if total_attempts > 0 then
@@ -496,11 +565,19 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
+-- Validate course configuration
+if #course ~= 5 then
+    gcs:send_text(3, "PYLON: ERROR - Course should have exactly 5 waypoints!")
+    gcs:send_text(3, string.format("PYLON: Found %d waypoints - script will not function correctly", #course))
+    return
+end
+
 gcs:send_text(6, "PYLON RACE: Loaded v4.2 (50Hz updates, tighter racing line)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
 gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
 gcs:send_text(6, string.format("PYLON: Script=50Hz Nav=20Hz Cruise=%.1fm/s Bank=%.0f° (from ROLL_LIMIT_DEG)", 
     CRUISE_SPEED, MAX_BANK_ANGLE))
 gcs:send_text(6, "PYLON: NW/NE waypoints adjusted closer to pylons")
+gcs:send_text(6, "PYLON: Course validated - 5 waypoints configured")
 
 return update()
