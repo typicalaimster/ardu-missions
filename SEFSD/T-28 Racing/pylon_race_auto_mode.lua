@@ -74,6 +74,9 @@ local race_start_time = 0
 local lap_start_times = {}
 local corner_validated = {}
 local last_gate_side = nil        -- Track which side of gate we're on
+local last_nav_update_ms = 0      -- Throttle nav updates to vehicle
+local last_nav_fail_log_ms = 0    -- Rate-limit "both APIs" failure log
+local NAV_UPDATE_INTERVAL_MS = 100  -- 10 Hz nav updates (Plane may reject if too fast)
 
 -- Log level: 6 = Info (key checkpoints), 7 = Debug (verbose)
 local LOG_LEVEL = 6
@@ -160,19 +163,38 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     log(7, "PYLON: set_nav enter")
     local current = get_position()
     if not current then log(6, "PYLON: set_nav no position"); return false end
-    log(7, "PYLON: set_nav make_location")
-    local target = make_location(target_lat, target_lon, alt_m or TARGET_ALTITUDE)
-    log(7, "PYLON: set_nav update_target_location")
-    local ok = vehicle:update_target_location(current, target)
-    if not ok then
-        -- Plane may only accept set_target_location( target ) during NAV_SCRIPT_TIME
-        log(6, "PYLON: update_target_location failed, try set_target_location")
-        ok = vehicle:set_target_location(target)
-    end
-    if not ok then
-        log(6, "PYLON: Nav update failed (both APIs)")
+    -- Reject invalid target (e.g. 0,0 from lookahead edge case)
+    if (target_lat == 0 and target_lon == 0) then
+        log(6, "PYLON: set_nav invalid target 0,0")
         return false
     end
+    log(7, "PYLON: set_nav make_location")
+    local target = make_location(target_lat, target_lon, alt_m or TARGET_ALTITUDE)
+
+    -- Throttle vehicle API calls: Plane can reject if updates are too frequent
+    local now_ms = millis()
+    if (now_ms - last_nav_update_ms) < NAV_UPDATE_INTERVAL_MS then
+        log(7, "PYLON: set_nav throttled")
+        return true  -- assume previous target still active
+    end
+
+    -- Plane typically accepts only set_target_location(target) during NAV_SCRIPT_TIME
+    -- Try it first, then fall back to update_target_location(current, target)
+    log(7, "PYLON: set_nav set_target_location")
+    local ok = vehicle:set_target_location(target)
+    if not ok then
+        log(7, "PYLON: set_target_location failed, try update_target_location")
+        ok = vehicle:update_target_location(current, target)
+    end
+    if not ok then
+        -- Log at most once per second to avoid flooding telemetry
+        if (now_ms - last_nav_fail_log_ms) >= 1000 then
+            log(6, "PYLON: Nav update failed (both APIs)")
+            last_nav_fail_log_ms = now_ms
+        end
+        return false
+    end
+    last_nav_update_ms = now_ms
     log(7, "PYLON: set_nav set_airspeed")
     vehicle:set_target_airspeed_NED(Vector3f(CRUISE_SPEED, 0, 0))
     log(7, "PYLON: set_nav ok")
@@ -342,6 +364,8 @@ function start_race(id, cmd, arg1, arg2)
     lap_start_times[1] = millis()
     corner_validated = {}
     last_gate_side = nil
+    last_nav_update_ms = 0   -- allow first nav update immediately
+    last_nav_fail_log_ms = 0 -- allow one failure log right away if needed
 
     log(6, "PYLON: start_race state set")
     gcs:send_text(3, "========== PYLON RACE START ==========")
@@ -384,7 +408,7 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v4.0 (Physics-based wind-adaptive navigation)")
+gcs:send_text(6, "PYLON RACE: Loaded v4.1 (Plane nav API order, 10Hz throttle, rate-limited log)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
 gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
 gcs:send_text(6, string.format("PYLON: Bank=%.0f° Anticipation=%.1fx Lookahead=%.1fs", 
