@@ -4,8 +4,16 @@
 -- CHANGES IN v4.2:
 --   - Adjusted waypoints to match human racing line (tighter around pylons)
 --   - Reduced turn anticipation factor from 1.2 to 0.9 (turn later, tighter line)
+--   - Reads MAX_BANK_ANGLE from ROLL_LIMIT_DEG parameter (adapts to aircraft tuning)
+--   - Increased script update rate from 20Hz to 50Hz (more responsive control)
+--   - Increased navigation update rate from 10Hz to 20Hz (better path tracking)
 --   - Added diagnostic logging for navigation API failures
 --   - Attempted use of set_target_velocity_NED as fallback
+--
+-- PERFORMANCE:
+--   - Script runs at 50Hz (20ms intervals) for smooth racing control
+--   - Navigation commands sent at 20Hz (50ms intervals) when API accepts them
+--   - Safe for H7-series autopilots with adequate SCR_HEAP_SIZE (80000+)
 --
 -- Mission Setup:
 --   WP1: Start gate or pre-race position
@@ -35,14 +43,29 @@ local function get_cruise_speed()
     return 18.0  -- final fallback
 end
 
+-- Read maximum roll angle from autopilot parameter
+-- This ensures script matches aircraft's configured roll limit
+local function get_max_bank_angle()
+    local roll_limit = param:get('ROLL_LIMIT_DEG')
+    if roll_limit and roll_limit > 0 then
+        return roll_limit
+    end
+    -- Fallback for older ArduPlane versions that might use LIM_ROLL_CD
+    local roll_limit_cd = param:get('LIM_ROLL_CD')
+    if roll_limit_cd and roll_limit_cd > 0 then
+        return roll_limit_cd / 100.0  -- convert centidegrees to degrees
+    end
+    return 45.0  -- conservative fallback
+end
+
 local CRUISE_SPEED = get_cruise_speed()
+local MAX_BANK_ANGLE = get_max_bank_angle()
 local DEFAULT_LAP_COUNT = 5      -- default laps (overridden by arg1)
-local UPDATE_RATE_HZ = 20        -- script update rate
-local TARGET_ALTITUDE = 9.13     -- meters AGL (30 feet)
+local UPDATE_RATE_HZ = 50        -- script update rate (50Hz for responsive racing control)
+local TARGET_ALTITUDE = 10.0     -- meters AGL (~33 feet)
 
 -- Physics-based turn configuration
 local GRAVITY = 9.81             -- m/s^2
-local MAX_BANK_ANGLE = 45.0      -- degrees - maximum bank angle for racing turns
 local TURN_ANTICIPATION_FACTOR = 0.9  -- REDUCED from 1.2 - turn later for tighter racing line
 local MIN_TURN_RADIUS = 15.0     -- meters - must get within to validate corner
 local LOOKAHEAD_TIME = 1.5       -- seconds - how far ahead to blend toward next waypoint
@@ -83,7 +106,7 @@ local corner_validated = {}
 local last_gate_side = nil        -- Track which side of gate we're on
 local last_nav_update_ms = 0      -- Throttle nav updates to vehicle
 local last_nav_fail_log_ms = 0    -- Rate-limit "both APIs" failure log
-local NAV_UPDATE_INTERVAL_MS = 100  -- 10 Hz nav updates (Plane may reject if too fast)
+local NAV_UPDATE_INTERVAL_MS = 50  -- 20Hz nav updates (was 100ms/10Hz, increased for better racing precision)
 local nav_fail_count = 0          -- Track total navigation failures
 local nav_success_count = 0       -- Track successful navigation updates
 
@@ -466,11 +489,11 @@ end
 -- INITIALIZATION
 -- ============================================================================
 
-gcs:send_text(6, "PYLON RACE: Loaded v4.2 (Tighter racing line, nav diagnostics)")
+gcs:send_text(6, "PYLON RACE: Loaded v4.2 (50Hz updates, tighter racing line)")
 gcs:send_text(6, "PYLON: Add NAV_SCRIPT_TIME to mission")
 gcs:send_text(6, "PYLON: Default " .. tostring(DEFAULT_LAP_COUNT) .. " laps, LOG_LEVEL=" .. tostring(LOG_LEVEL))
-gcs:send_text(6, string.format("PYLON: Bank=%.0f° Anticipation=%.1fx (REDUCED) Lookahead=%.1fs", 
-    MAX_BANK_ANGLE, TURN_ANTICIPATION_FACTOR, LOOKAHEAD_TIME))
+gcs:send_text(6, string.format("PYLON: Script=50Hz Nav=20Hz Cruise=%.1fm/s Bank=%.0f° (from ROLL_LIMIT_DEG)", 
+    CRUISE_SPEED, MAX_BANK_ANGLE))
 gcs:send_text(6, "PYLON: NW/NE waypoints adjusted closer to pylons")
 
 return update()
