@@ -136,11 +136,20 @@ def analyze_navigation_target(mlog):
             last_sample_time = timestamp
             
             if msg.get_type() == 'NTUN':
+                # ArduPilot dataflash uses Dist/AltE/TBrg/NavBrg; some logs use WpDist/BrErr/AltErr
+                wp_dist = getattr(msg, 'WpDist', None) or getattr(msg, 'Dist', None)
+                bearing_err = getattr(msg, 'BrErr', None)
+                if bearing_err is None and hasattr(msg, 'NavBrg') and hasattr(msg, 'TBrg'):
+                    try:
+                        bearing_err = getattr(msg, 'NavBrg', 0) - getattr(msg, 'TBrg', 0)
+                    except (TypeError, AttributeError):
+                        pass
+                alt_err = getattr(msg, 'AltErr', None) or getattr(msg, 'AltE', None)
                 targets.append({
                     'time': timestamp,
-                    'wp_dist': msg.WpDist if hasattr(msg, 'WpDist') else None,
-                    'bearing_error': msg.BrErr if hasattr(msg, 'BrErr') else None,
-                    'altitude_error': msg.AltErr if hasattr(msg, 'AltErr') else None,
+                    'wp_dist': wp_dist,
+                    'bearing_error': bearing_err,
+                    'altitude_error': alt_err,
                 })
         except AttributeError:
             continue

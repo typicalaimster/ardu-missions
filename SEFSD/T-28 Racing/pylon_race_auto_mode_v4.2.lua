@@ -20,6 +20,8 @@
 --   - CRITICAL FIX: Division by zero protection in turn calculation (rate-limited warning)
 --   - Added lap count limit (max 100 laps) to prevent memory issues
 --   - Added groundspeed sanity check (0.5 to 100 m/s) to filter bad data
+--   - Nav grace period (500ms after start): failures not counted toward abort
+--   - Abort threshold increased to 50 consecutive fails (~1s) to avoid instant abort on cold start
 --   - Added dataflash logging (PYLR/PYLL messages) for post-race analysis
 --   - All warnings rate-limited to prevent log spam
 --   - Removed excessive debug logging for better performance at 50Hz
@@ -147,7 +149,8 @@ local NAV_UPDATE_INTERVAL_MS = 50  -- 20Hz nav updates (was 100ms/10Hz, increase
 local nav_fail_count = 0          -- Track total navigation failures
 local nav_success_count = 0       -- Track successful navigation updates
 local consecutive_nav_fails = 0   -- Track consecutive failures for abort detection
-local MAX_CONSECUTIVE_FAILS = 10  -- Abort race after 10 consecutive nav failures (~200ms at 50Hz)
+local MAX_CONSECUTIVE_FAILS = 50  -- Abort after 50 consecutive failures (~1s at 50Hz) - was 10, increased so brief startup delay doesn't abort
+local NAV_GRACE_PERIOD_MS = 500   -- Don't count nav failures toward abort in first 500ms (lets vehicle accept script nav)
 local last_telemetry_ms = 0       -- Track last telemetry update for more robust timing
 local last_bank_warn_ms = 0       -- Rate-limit bank angle warning to prevent spam
 local best_lap_time = nil         -- Track best lap time for comparison
@@ -302,10 +305,15 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     
     -- ALL ATTEMPTS FAILED
     nav_fail_count = nav_fail_count + 1
-    consecutive_nav_fails = consecutive_nav_fails + 1
     
-    -- CRITICAL: Check if we've lost navigation completely
-    if consecutive_nav_fails >= MAX_CONSECUTIVE_FAILS then
+    -- During grace period after race start, don't count toward abort (vehicle may need time to accept script nav)
+    local in_grace = (race_start_time > 0) and ((now_ms - race_start_time) < NAV_GRACE_PERIOD_MS)
+    if not in_grace then
+        consecutive_nav_fails = consecutive_nav_fails + 1
+    end
+    
+    -- CRITICAL: Check if we've lost navigation completely (after grace period)
+    if not in_grace and consecutive_nav_fails >= MAX_CONSECUTIVE_FAILS then
         gcs:send_text(3, string.format("PYLON: ABORTING - Navigation system unresponsive (%d consecutive failures)", consecutive_nav_fails))
         finish_race()
         return false
@@ -314,8 +322,9 @@ function set_navigation_target(target_lat, target_lon, alt_m)
     -- Log diagnostic info (rate-limited to once per second)
     if (now_ms - last_nav_fail_log_ms) >= 1000 then
         local mode = vehicle:get_mode()
-        gcs:send_text(6, string.format("PYLON: Nav FAIL (all 3 APIs) mode=%d fails=%d/%d success=%d", 
-                                  mode, consecutive_nav_fails, nav_fail_count, nav_success_count))
+        gcs:send_text(6, string.format("PYLON: Nav FAIL (all 3 APIs) mode=%d fails=%d/%d success=%d%s", 
+                                  mode, consecutive_nav_fails, nav_fail_count, nav_success_count,
+                                  in_grace and " [grace]" or ""))
         last_nav_fail_log_ms = now_ms
     end
     
