@@ -126,6 +126,7 @@ local WP5_SE = {lat = 32.76310780, lon = -117.21337620, name = "SE"}  -- S of Ea
 
 -- Oval course sequence
 local course = {START_GATE, WP2_SW, WP3_NW, WP4_NE, WP5_SE}
+--- local course = {START_GATE, WP5_SE, WP4_NE, WP3_NW, WP2_SW}
 
 -- ============================================================================
 -- INTERNAL STATE
